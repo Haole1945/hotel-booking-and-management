@@ -1,0 +1,87 @@
+CREATE DEFINER=`root`@`localhost` PROCEDURE `GetAvailableRoomsByHangPhong`(
+    IN p_ngay_den DATE,
+    IN p_ngay_di  DATE
+)
+BEGIN
+    /*
+      Trả về số phòng trống theo từng hạng phòng:
+      SO_PHONG_TRONG = TỔNG SỐ PHÒNG - (PHÒNG BỊ CHIẾM) - (PHÒNG KHÔNG KHẢ DỤNG)
+      - PHÒNG BỊ CHIẾM gồm:
+          + Các phòng thuộc phiếu ĐẶT đã XÁC NHẬN trùng khoảng ngày (pd)
+          + Các phòng đang thuê trong ct_phieu_thue chưa thanh toán trùng khoảng ngày (ctpt)
+      - PHÒNG KHÔNG KHẢ DỤNG: trạng thái 'Đang dọn dẹp', 'Đang bảo trì', 'Đã đặt' ở bảng phong
+    */
+
+    SELECT
+        hp.ID_HANG_PHONG,
+        kp.TEN_KP  AS TEN_KIEU_PHONG,
+        lp.TEN_LP  AS TEN_LOAI_PHONG,
+        COUNT(p.SOPHONG) AS TONG_SO_PHONG,
+        (
+            COUNT(p.SOPHONG)
+            - COALESCE(occupied.SO_PHONG_CHIEM, 0)
+            - COALESCE(unavailable.SO_PHONG_KHONG_KHADUNG, 0)
+        ) AS SO_PHONG_TRONG
+    FROM hang_phong hp
+    LEFT JOIN kieu_phong kp ON hp.ID_KP = kp.ID_KP
+    LEFT JOIN loai_phong lp ON hp.ID_LP = lp.ID_LP
+    LEFT JOIN phong p       ON hp.ID_HANG_PHONG = p.ID_HANG_PHONG
+
+    -- Các phòng đang bị chiếm bởi đặt phòng đã xác nhận hoặc đang thuê
+    LEFT JOIN (
+        SELECT
+            hp_sub.ID_HANG_PHONG,
+            SUM(occ.phong_chiem) AS SO_PHONG_CHIEM
+        FROM hang_phong hp_sub
+        LEFT JOIN (
+            -- 1) Phòng bị giữ bởi phiếu đặt đã xác nhận, trùng khoảng ngày
+            SELECT
+                ctpd.ID_HANG_PHONG,
+                SUM(ctpd.SO_LUONG_PHONG_O) AS phong_chiem
+            FROM phieudat pd
+            INNER JOIN ctphieudat ctpd
+                    ON pd.ID_PD = ctpd.ID_PD
+            WHERE pd.TRANG_THAI = 'Xác nhận'
+              AND pd.NGAY_BD_THUE < p_ngay_di
+              AND pd.NGAY_DI      > p_ngay_den
+            GROUP BY ctpd.ID_HANG_PHONG
+
+            UNION ALL
+
+            -- 2) Phòng đang thuê (chưa thanh toán), trùng khoảng ngày
+            SELECT
+                p_thue.ID_HANG_PHONG,
+                COUNT(*) AS phong_chiem
+            FROM ct_phieu_thue ctpt
+            INNER JOIN phong p_thue
+                    ON ctpt.SO_PHONG = p_thue.SOPHONG
+            WHERE ctpt.TT_THANH_TOAN = 'Chưa Thanh Toán'
+              AND ctpt.NGAY_DEN < p_ngay_di
+              AND ctpt.NGAY_DI  > p_ngay_den
+            GROUP BY p_thue.ID_HANG_PHONG
+        ) AS occ
+          ON hp_sub.ID_HANG_PHONG = occ.ID_HANG_PHONG
+        GROUP BY hp_sub.ID_HANG_PHONG
+    ) AS occupied
+      ON hp.ID_HANG_PHONG = occupied.ID_HANG_PHONG
+
+    -- Các phòng không khả dụng theo trạng thái hiện tại
+    LEFT JOIN (
+        SELECT
+            p_unavail.ID_HANG_PHONG,
+            COUNT(*) AS SO_PHONG_KHONG_KHADUNG
+        FROM phong p_unavail
+        INNER JOIN trangthai tt
+                ON p_unavail.ID_TT = tt.ID_TT
+        WHERE tt.TEN_TRANG_THAI IN ('Đang dọn dẹp', 'Đang bảo trì', 'Đã đặt')
+        GROUP BY p_unavail.ID_HANG_PHONG
+    ) AS unavailable
+      ON hp.ID_HANG_PHONG = unavailable.ID_HANG_PHONG
+
+    GROUP BY
+        hp.ID_HANG_PHONG,
+        kp.TEN_KP,
+        lp.TEN_LP
+    ORDER BY
+        hp.ID_HANG_PHONG;
+END
